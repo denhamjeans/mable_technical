@@ -90,11 +90,11 @@ con.execute("""
         SELECT
             id,
             user_id,
-            'support_provider' AS user_type,
+            'worker' AS user_type,
             worker_segment AS segment,
             created_at,
             updated_at,
-            HASH(id, 'support_provider') AS hash_id
+            HASH(id, 'worker') AS hash_id
         FROM support_provider_profiles_bronze
         UNION ALL
         SELECT
@@ -115,6 +115,7 @@ con.sql('SELECT * FROM dim_profiles_silver').show(max_width=1000)
 # - pivcot the table structure such that the status updates are timestamped as distinct columns.
 # - remove rows with NA values
 # - remove rows with rejected status
+# - standarize user_type as 'worker' rather than support provider
 
 # Create schema
 con.execute("""
@@ -268,3 +269,32 @@ con.execute("""
         FROM users_silver
 """)
 con.sql('SELECT * FROM dim_users_gold')
+
+
+
+##Analysis
+
+con.sql("""
+    WITH service_logs AS (
+        SELECT 
+            fact_service_logs_gold.*,
+            worker_profile.segment AS worker_segment,
+            worker_user.first_name AS worker_first_name,
+            client_profile.segment AS client_segment,
+            client_user.first_name AS client_first_name
+        FROM fact_service_logs_gold
+        LEFT JOIN dim_profiles_gold AS worker_profile
+            ON fact_service_logs_gold.worker_id = worker_profile.id
+            AND worker_profile.user_type = 'worker'
+        LEFT JOIN dim_profiles_gold AS client_profile
+            ON fact_service_logs_gold.client_id = client_profile.id
+            AND client_profile.user_type = 'client'
+        LEFT JOIN dim_users_gold AS client_user
+            ON fact_service_logs_gold.client_id = client_user.id
+    )
+""").show(max_width=1000)
+
+
+# NOTE:
+# - user table can be consolidated
+# - We should hash + salt the names for analysis here.
