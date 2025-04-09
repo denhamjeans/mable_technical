@@ -37,7 +37,7 @@ for table_name, data in data_dict.items():
     profile.to_file(f"outputs/{table_name}_profile.html") # save the report to a file
 
 
- 
+
 ## 1. Create Bronze Layer: Insert Raw Data into DB
 # Create / connect to database
 con = dd.connect('mable.db')
@@ -65,59 +65,84 @@ con.sql('SHOW TABLES')
 # set PRIMARY KEY as NOT NULL
 
 
-# -- client_profile table
-con.execute("""
-    CREATE OR REPLACE TABLE client_profiles_silver (
-        id INTEGER NOT NULL PRIMARY KEY,
-        user_id INTEGER,
-        customer_segment TEXT,
-        created_at DATETIME,
-        updated_at DATETIME
-    );
-""")
-con.execute("""
-    INSERT INTO client_profiles_silver
-        SELECT * FROM client_profiles_bronze
-""")
-con.sql('SELECT * FROM client_profiles_silver')
+# -- dim_provider_profiles table
+# - combine support and provider dimensions using UNION ALL
+# - create hash_id as primary key to test for uniqueness
+# - create user_type column to identify the type of user
+# - create segment column to identify the segment of user (for both client and support provider)
 
-
-# -- support_provider_profiles table
-con.execute("""
-    CREATE OR REPLACE TABLE support_provider_profiles_silver (
-        id INTEGER NOT NULL PRIMARY KEY,
-        user_id INTEGER,
-        worker_segment TEXT,
-        created_at DATETIME,
-        updated_at DATETIME
-    );
-""")
-con.execute("""
-    INSERT INTO support_provider_profiles_silver
-        SELECT * FROM support_provider_profiles_bronze
-""")
-con.sql('SELECT * FROM support_provider_profiles_silver')
-
-
-# -- service_logs table
 # Create schema
 con.execute("""
-    CREATE OR REPLACE TABLE service_logs_silver (
+    CREATE OR REPLACE TABLE dim_profiles_silver (
+        id INTEGER NOT NULL,
+        user_id INTEGER,
+        user_type TEXT,
+        segment TEXT,
+        created_at DATETIME,
+        updated_at DATETIME,
+        hash_id TEXT NOT NULL PRIMARY KEY
+    );
+""")
+
+# Insert data into the table
+con.execute("""
+    INSERT INTO dim_profiles_silver
+        SELECT
+            id,
+            user_id,
+            'support_provider' AS user_type,
+            worker_segment AS segment,
+            created_at,
+            updated_at,
+            HASH(id, 'support_provider') AS hash_id
+        FROM support_provider_profiles_bronze
+        UNION ALL
+        SELECT
+            id,
+            user_id,
+            'client' AS user_type,
+            customer_segment AS segment,
+            created_at,
+            updated_at,
+            HASH(id, 'client') AS hash_id
+        FROM client_profiles_bronze
+""")
+con.sql('SELECT * FROM dim_profiles_silver').show(max_width=1000)
+
+
+## -- service_logs table
+# - test for uniqueness
+# - pivcot the table structure such that the status updates are timestamped as distinct columns.
+# - remove rows with NA values
+# - remove rows with rejected status
+
+# Create schema
+con.execute("""
+    CREATE OR REPLACE TABLE fact_service_logs_silver (
         id INTEGER NOT NULL PRIMARY KEY,
         client_id INTEGER,
-        worker_id TEXT,
-        start_time TEXT,
-        end_time TEXT,
-        hourly_rate TEXT,
+        worker_id INTEGER,
+        start_time DATETIME,
+        end_time DATETIME,
+        hourly_rate DOUBLE,
         approved_time DATETIME,
         submitted_time DATETIME
     );
 """)
 # Insert data into the table
 con.execute("""
-    INSERT INTO service_logs_silver
+    INSERT INTO fact_service_logs_silver
         WITH service_logs_clean AS (
-            SELECT *
+            SELECT
+                id,
+                client_id,
+                worker_id,
+                status,
+                start_time,
+                end_time,
+                CAST(REPLACE(hourly_rate, '$','') AS DOUBLE) AS hourly_rate,
+                created_at,
+                updated_at
             FROM service_logs_bronze
             WHERE worker_id IS NOT NULL
                 AND status <> 'rejected'
@@ -130,29 +155,16 @@ con.execute("""
         GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate
         ORDER BY id;
 """)
-con.sql('SELECT * FROM support_provider_profiles_silver').show(max_width=1000)
+con.sql('SELECT * FROM fact_service_logs_silver').show(max_width=1000)
 
 
-con.sql("""
-        WITH service_logs_clean AS (
-            SELECT *
-            FROM service_logs_bronze
-            WHERE worker_id IS NOT NULL
-                AND status <> 'rejected'
-            QUALIFY row_number() OVER (PARTITION BY id, status ORDER BY updated_at DESC) = 1
-        )
-                
-        PIVOT service_logs_clean
-        ON status
-        USING max(updated_at) AS time
-        GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate
-        ORDER BY id;
-        """).show(max_width=1000)
 
+## -- users table
+# - test for uniqueness
+# - deduplicate the table so that only the most recent row is kept
 
-# -- users table
 con.execute("""
-    CREATE OR REPLACE TABLE users_silver (
+    CREATE OR REPLACE TABLE dim_users_silver (
         id INTEGER NOT NULL PRIMARY KEY,
         first_name TEXT,
         last_name TEXT,
@@ -163,20 +175,96 @@ con.execute("""
     );
 """)
 con.execute("""
-    INSERT INTO users_silver
+    INSERT INTO dim_users_silver
         SELECT
             *
         FROM users_bronze
         QUALIFY row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1
 """)
-con.sql('SELECT * FROM users_silver')
+con.sql('SELECT * FROM dim_users_silver')
 
-## -- Changes Summary
-# - users_silver: Only show most recently modified rows from SCDII table. 
-# - service_logs_silver: Widen table to show submitted_time, approved_time, and rejected_time.
-# - service_logs_silver: Remove rows with NA values.
-# - 
+
 
 
 
 ## 4. Create Gold Layer: Data Aggregation and Analysis
+#- No changes in the gold layer
+
+# Create schema
+con.execute("""
+    CREATE OR REPLACE TABLE dim_profiles_gold (
+        id INTEGER NOT NULL,
+        user_id INTEGER,
+        user_type TEXT,
+        segment TEXT,
+        created_at DATETIME,
+        updated_at DATETIME,
+        hash_id TEXT NOT NULL PRIMARY KEY
+    );
+""")
+
+# Insert data into the table
+con.execute("""
+    INSERT INTO dim_profiles_gold
+        SELECT *
+        FROM dim_profiles_silver
+""")
+con.sql('SELECT * FROM dim_profiles_gold').show(max_width=1000)
+
+
+## -- service_logs table
+# - add aggregate colummns for analysis
+
+# Create schema
+con.execute("""
+    CREATE OR REPLACE TABLE fact_service_logs_gold (
+        id INTEGER NOT NULL PRIMARY KEY,
+        client_id INTEGER,
+        worker_id INTEGER,
+        start_time DATETIME,
+        end_time DATETIME,
+        hourly_rate DOUBLE,
+        approved_time DATETIME,
+        submitted_time DATETIME,
+        time_to_approval INTERVAL
+    );
+""")
+# Insert data into the table
+con.execute("""
+    INSERT INTO fact_service_logs_gold
+        SELECT
+            id,
+            client_id,
+            worker_id,
+            start_time,
+            end_time,
+            hourly_rate,
+            approved_time,
+            submitted_time,
+            (strptime(LEFT(approved_time, 19), '%Y-%m-%d %H:%M:%S') - strptime(LEFT(submitted_time, 19), '%Y-%m-%d %H:%M:%S')) AS time_to_approval,
+        FROM fact_service_logs_silver
+""")
+con.sql('SELECT * FROM fact_service_logs_gold').show(max_width=1000)
+
+# -- users table
+# - no changes in the gold layer
+
+#Create schema
+con.execute("""
+    CREATE OR REPLACE TABLE dim_users_gold (
+        id INTEGER NOT NULL PRIMARY KEY,
+        first_name TEXT,
+        last_name TEXT,
+        user_type TEXT,
+        state TEXT,
+        created_at DATETIME,
+        updated_at DATETIME
+    );
+""")
+# Insert data into the table
+con.execute("""
+    INSERT INTO dim_users_gold
+        SELECT *
+        FROM users_silver
+""")
+con.sql('SELECT * FROM dim_users_gold')
