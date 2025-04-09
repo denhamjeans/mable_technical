@@ -106,12 +106,11 @@ con.execute("""
         id INTEGER NOT NULL PRIMARY KEY,
         client_id INTEGER,
         worker_id TEXT,
-        status TEXT,
         start_time TEXT,
         end_time TEXT,
         hourly_rate TEXT,
-        created_at DATETIME,
-        updated_at DATETIME
+        approved_time DATETIME,
+        submitted_time DATETIME
     );
 """)
 # Insert data into the table
@@ -122,30 +121,33 @@ con.execute("""
             FROM service_logs_bronze
             WHERE worker_id IS NOT NULL
                 AND status <> 'rejected'
+            QUALIFY row_number() OVER (PARTITION BY id, status ORDER BY updated_at DESC) = 1
         )
                 
         PIVOT service_logs_clean
         ON status
         USING max(updated_at) AS time
-        GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate;
+        GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate
+        ORDER BY id;
 """)
 con.sql('SELECT * FROM support_provider_profiles_silver').show(max_width=1000)
 
 
 con.sql("""
-WITH service_logs_clean AS (
-    SELECT *
-    FROM service_logs_bronze
-    WHERE worker_id IS NOT NULL
-        AND status != 'rejected'
-)
-
-PIVOT service_logs_clean
-ON status
-USING max(updated_at) AS time
-GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate
-ORDER BY id;
-""").show(max_width=1000)
+        WITH service_logs_clean AS (
+            SELECT *
+            FROM service_logs_bronze
+            WHERE worker_id IS NOT NULL
+                AND status <> 'rejected'
+            QUALIFY row_number() OVER (PARTITION BY id, status ORDER BY updated_at DESC) = 1
+        )
+                
+        PIVOT service_logs_clean
+        ON status
+        USING max(updated_at) AS time
+        GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate
+        ORDER BY id;
+        """).show(max_width=1000)
 
 
 # -- users table
