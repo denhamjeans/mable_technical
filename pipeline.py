@@ -100,6 +100,7 @@ con.sql('SELECT * FROM support_provider_profiles_silver')
 
 
 # -- service_logs table
+# Create schema
 con.execute("""
     CREATE OR REPLACE TABLE service_logs_silver (
         id INTEGER NOT NULL PRIMARY KEY,
@@ -113,12 +114,38 @@ con.execute("""
         updated_at DATETIME
     );
 """)
+# Insert data into the table
 con.execute("""
     INSERT INTO service_logs_silver
-        SELECT * 
-        FROM service_logs_bronze;
+        WITH service_logs_clean AS (
+            SELECT *
+            FROM service_logs_bronze
+            WHERE worker_id IS NOT NULL
+                AND status <> 'rejected'
+        )
+                
+        PIVOT service_logs_clean
+        ON status
+        USING max(updated_at) AS time
+        GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate;
 """)
-con.sql('SELECT * FROM support_provider_profiles_silver')
+con.sql('SELECT * FROM support_provider_profiles_silver').show(max_width=1000)
+
+
+con.sql("""
+WITH service_logs_clean AS (
+    SELECT *
+    FROM service_logs_bronze
+    WHERE worker_id IS NOT NULL
+        AND status != 'rejected'
+)
+
+PIVOT service_logs_clean
+ON status
+USING max(updated_at) AS time
+GROUP BY id, client_id, worker_id, start_time, end_time, hourly_rate
+ORDER BY id;
+""").show(max_width=1000)
 
 
 # -- users table
@@ -141,6 +168,13 @@ con.execute("""
         QUALIFY row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1
 """)
 con.sql('SELECT * FROM users_silver')
+
+## -- Changes Summary
+# - users_silver: Only show most recently modified rows from SCDII table. 
+# - service_logs_silver: Widen table to show submitted_time, approved_time, and rejected_time.
+# - service_logs_silver: Remove rows with NA values.
+# - 
+
 
 
 ## 4. Create Gold Layer: Data Aggregation and Analysis
